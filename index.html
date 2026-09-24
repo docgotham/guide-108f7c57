@@ -14,7 +14,6 @@
     input{width:100%;font:inherit;border:2px solid #9abdb7;border-radius:8px;padding:12px;margin:0 0 14px;min-height:48px}input:focus-visible,button:focus-visible{outline:3px solid #d4863f;outline-offset:2px}
     button{font:inherit;font-weight:800;background:#236f72;color:#fff;border:0;border-radius:8px;padding:12px 20px;min-height:48px;cursor:pointer;width:100%}button:disabled{opacity:.65;cursor:wait}
     .error{color:#a63524;font-weight:700;min-height:1.5em;margin-top:13px}.hint{font-size:.9rem;color:#516863;margin-top:16px;margin-bottom:0}
-    iframe{display:none;border:0;width:100%;height:100vh;height:100dvh}body.unlocked main{display:none}body.unlocked iframe{display:block}
   </style>
 </head>
 <body>
@@ -32,7 +31,6 @@
       <p class="hint">The guide stays open in this tab. If you reload it, enter the password again.</p>
     </div>
   </main>
-  <iframe id="guide" title="Cat-sitting guide"></iframe>
   <script>
     const form = document.getElementById('unlock-form');
     const passwordInput = document.getElementById('password');
@@ -53,9 +51,10 @@
         const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(passwordInput.value), 'PBKDF2', false, ['deriveKey']);
         const key = await crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:600000,hash:'SHA-256'}, keyMaterial, {name:'AES-GCM',length:256}, false, ['decrypt']);
         const plaintext = await crypto.subtle.decrypt({name:'AES-GCM',iv}, key, ciphertext);
-        document.getElementById('guide').srcdoc = new TextDecoder().decode(plaintext);
         passwordInput.value = '';
-        document.body.classList.add('unlocked');
+        document.open();
+        document.write(new TextDecoder().decode(plaintext));
+        document.close();
       } catch (error) {
         message.textContent = error.name === 'OperationError' ? 'That password did not work. Please try again.' : error.message || 'Could not open the guide.';
       } finally {
