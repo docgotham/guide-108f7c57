@@ -22,13 +22,14 @@
       <p class="eyebrow">Private guide</p>
       <h1>Cat-sitting guide</h1>
       <p>Enter the password we shared with you to open the guide.</p>
-      <form id="unlock-form">
+      <p id="checking" role="status">Checking saved access…</p>
+      <form id="unlock-form" hidden>
         <label for="password">Password</label>
         <input id="password" type="password" autocomplete="off" required>
         <button id="unlock-button" type="submit">Open guide</button>
       </form>
       <p id="message" class="error" role="alert" aria-live="polite"></p>
-      <p class="hint">The guide stays open in this tab. If you reload it, enter the password again.</p>
+      <p class="hint">This browser remembers access for one hour. After that, enter the password again.</p>
     </div>
   </main>
   <script>
@@ -36,25 +37,94 @@
     const passwordInput = document.getElementById('password');
     const button = document.getElementById('unlock-button');
     const message = document.getElementById('message');
+    const checking = document.getElementById('checking');
+    const sessionName = 'cat-sitting-guide-hourly-session';
+    const expiryName = 'cat-sitting-guide-expires-at';
+    const sessionLength = 60 * 60 * 1000;
+
+    function openSessionDb() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(sessionName, 1);
+        request.onupgradeneeded = () => request.result.createObjectStore('access');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+    async function readSession() {
+      const db = await openSessionDb();
+      return new Promise((resolve, reject) => {
+        const request = db.transaction('access', 'readonly').objectStore('access').get('current');
+        request.onsuccess = () => { db.close(); resolve(request.result); };
+        request.onerror = () => { db.close(); reject(request.error); };
+      });
+    }
+    async function writeSession(entry) {
+      const db = await openSessionDb();
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction('access', 'readwrite');
+        transaction.objectStore('access').put(entry, 'current');
+        transaction.oncomplete = () => { db.close(); resolve(); };
+        transaction.onerror = () => { db.close(); reject(transaction.error); };
+      });
+    }
+    async function clearSession() {
+      const db = await openSessionDb();
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction('access', 'readwrite');
+        transaction.objectStore('access').delete('current');
+        transaction.oncomplete = () => { db.close(); resolve(); };
+        transaction.onerror = () => { db.close(); reject(transaction.error); };
+      });
+    }
+    async function loadPayload() {
+      const response = await fetch('guide.enc', {cache:'no-store'});
+      if (!response.ok) throw new Error('Could not load the guide. Please try again.');
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return {salt:bytes.slice(0,16),iv:bytes.slice(16,28),ciphertext:bytes.slice(28)};
+    }
+    function renderGuide(plaintext, expiresAt) {
+      try { localStorage.setItem(expiryName, String(expiresAt)); } catch {}
+      document.open();
+      document.write(new TextDecoder().decode(plaintext));
+      document.close();
+    }
+    async function resumeSession() {
+      try {
+        const entry = await readSession();
+        if (!entry) return;
+        if (Date.now() >= entry.expiresAt) {
+          await clearSession();
+          return;
+        }
+        const payload = await loadPayload();
+        if (entry.salt.length !== payload.salt.length || entry.salt.some((value, index) => value !== payload.salt[index])) {
+          await clearSession();
+          return;
+        }
+        const plaintext = await crypto.subtle.decrypt({name:'AES-GCM',iv:payload.iv}, entry.key, payload.ciphertext);
+        renderGuide(plaintext, entry.expiresAt);
+      } catch {
+        try { await clearSession(); } catch {}
+      } finally {
+        checking.hidden = true;
+        form.hidden = false;
+      }
+    }
+    resumeSession();
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       button.disabled = true;
       button.textContent = 'Opening…';
       message.textContent = '';
       try {
-        const response = await fetch('guide.enc', {cache:'no-store'});
-        if (!response.ok) throw new Error('Could not load the guide. Please try again.');
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        const salt = bytes.slice(0,16);
-        const iv = bytes.slice(16,28);
-        const ciphertext = bytes.slice(28);
+        const payload = await loadPayload();
         const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(passwordInput.value), 'PBKDF2', false, ['deriveKey']);
-        const key = await crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:600000,hash:'SHA-256'}, keyMaterial, {name:'AES-GCM',length:256}, false, ['decrypt']);
-        const plaintext = await crypto.subtle.decrypt({name:'AES-GCM',iv}, key, ciphertext);
+        const key = await crypto.subtle.deriveKey({name:'PBKDF2',salt:payload.salt,iterations:600000,hash:'SHA-256'}, keyMaterial, {name:'AES-GCM',length:256}, false, ['decrypt']);
+        const plaintext = await crypto.subtle.decrypt({name:'AES-GCM',iv:payload.iv}, key, payload.ciphertext);
+        const expiresAt = Date.now() + sessionLength;
+        try { await writeSession({key,salt:Array.from(payload.salt),expiresAt}); } catch {}
         passwordInput.value = '';
-        document.open();
-        document.write(new TextDecoder().decode(plaintext));
-        document.close();
+        renderGuide(plaintext, expiresAt);
       } catch (error) {
         message.textContent = error.name === 'OperationError' ? 'That password did not work. Please try again.' : error.message || 'Could not open the guide.';
       } finally {
